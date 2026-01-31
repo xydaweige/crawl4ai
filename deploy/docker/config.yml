@@ -6,7 +6,8 @@ app:
   port: 11235
   reload: False
   workers: 1
-  timeout_keep_alive: 300
+  # timeout_keep_alive: 3000
+  timeout_keep_alive: 300000000
 
 # Default LLM Configuration
 llm:
@@ -14,7 +15,7 @@ llm:
   api_token: "EMPTY"
   api_key: "EMPTY"
   base_url: "http://192.168.129.95:8800/v1"
-  temperature: 1.0
+  temperature: 0.7
   # api_key: sk-...  # If you pass the API key directly (not recommended)
 
 # Redis Configuration
@@ -61,7 +62,8 @@ crawler:
     enabled: true
     base_delay: [1.0, 2.0]
   timeouts:
-    stream_init: 30.0  # Timeout for stream initialization
+    # stream_init: 30.0  # Timeout for stream initialization
+    stream_init: 300.0  # Timeout for stream initialization
     batch_process: 300.0  # Timeout for batch processing
   pool:
     max_pages: 40                          # ← GLOBAL_SEM permits
@@ -70,6 +72,8 @@ crawler:
     kwargs:
       headless: true
       text_mode: true
+      use_managed_browser: true
+      user_data_dir: "/home/appuser/.crawl4ai/profiles/lis"
     extra_args:
       # - "--single-process"
       - "--no-sandbox"
@@ -112,7 +116,6 @@ webhooks:
     max_attempts: 5
     initial_delay_ms: 1000  # 1s, 2s, 4s, 8s, 16s exponential backoff
     max_delay_ms: 32000
-    # 增加了调用函数时的超时时间为60s
-    timeout_ms: 60000  # 30s timeout per webhook call
+    timeout_ms: 300000  # 30s timeout per webhook call
   headers:  # Optional: default headers to include
     User-Agent: "Crawl4AI-Webhook/1.0"
