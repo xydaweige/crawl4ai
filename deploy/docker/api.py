@@ -48,6 +48,12 @@ from utils import (
     load_config
 )
 from webhook import WebhookDeliveryService
+from token_manager import (
+    extract_domain_from_url,
+    load_token_for_domain,
+    generate_hooks_code,
+    get_crawler_config_overrides,
+)
 
 import psutil, time
 
@@ -104,6 +110,14 @@ async def handle_llm_qa(
             temperature=get_llm_temperature(config),
             base_url=get_llm_base_url(config)
         )
+        
+                # response = perform_completion_with_backoff(
+        #     provider='openai/qwen_14b',
+        #     prompt_with_variables=prompt,
+        #     api_token='32000', # Returns None to let litellm handle it
+        #     temperature=0.0,
+        #     base_url='http://192.168.129.95:8800/v1'
+        # )
 
         return response.choices[0].message.content
     except Exception as e:
@@ -272,6 +286,33 @@ async def handle_markdown_request(
             md_generator = DefaultMarkdownGenerator(content_filter=content_filter)
 
         cache_mode = CacheMode.ENABLED if cache == "1" else CacheMode.WRITE_ONLY
+        
+                # extraction_strategy = LLMExtractionStrategy(
+        #     llm_config=LLMConfig(
+        #                 provider=provider or config["llm"]["provider"],
+        #                 api_token=get_llm_api_key(
+        #                     config, provider
+        #                 ),  # Returns None to let litellm handle it
+        #                 temperature=temperature
+        #                 or get_llm_temperature(config, provider),
+        #                 base_url=base_url or get_llm_base_url(config, provider),
+        #             ),
+        #     schema=None,
+        #     extraction_type="json",
+        #     instruction="""
+        #     这是一个搜索引擎网页返回的界面，整理搜索结果，并将结果按照以下格式输出:["title:网页标题,url:网页链接","title:网页标题,url:网页链接"]
+        #     """,
+        #     chunk_token_threshold=4096,
+        #     overlap_rate=0.001,
+        #     apply_chunking=True,
+        #     input_format="html",
+        # )
+
+        # # Build crawler config
+        # crawl_config = CrawlerRunConfig(
+        #     extraction_strategy=extraction_strategy,
+        #     cache_mode=CacheMode.BYPASS
+        # )
 
         async with AsyncWebCrawler() as crawler:
             result = await crawler.arun(
@@ -809,6 +850,120 @@ async def handle_crawl_job(
     background_tasks.add_task(_runner)
     return {"task_id": task_id}
 
+async def clean_recommendations_with_llm(markdown_content: str, config: dict) -> str:
+    """
+    使用 LLM 清理推荐内容和外部链接
+
+    Args:
+        markdown_content: Pruning 过滤后的 markdown 内容
+        config: 配置对象
+
+    Returns:
+        清理后的 markdown 内容
+    """
+    try:
+        # 创建 LLM Content Filter
+        llm_filter = LLMContentFilter(
+            llm_config=LLMConfig(
+                provider=config["llm"]["provider"],
+                api_token=get_llm_api_key(config),
+                base_url=get_llm_base_url(config),
+                temperature=0.0,
+            ),
+            instruction="""
+            你是一个推荐内容清理专家。你的任务是从已经清洗过的文章中删除推荐类内容和外部链接。
+
+            ## 你的任务：
+
+            在已经去除了导航、页脚、侧边栏等结构性内容的基础上，进一步清理：
+
+            ### 必须删除的内容：
+
+            1. **推荐类内容**（包含以下关键词的区块）：
+                - 为你推荐、推荐阅读、推荐文章
+                - 相关文章、相关阅读、相关推荐
+                - 猜你喜欢、你可能喜欢、你还想看
+                - 热门推荐、热门文章、热门话题
+                - 最新文章、最新动态
+                - 更多精彩、更多内容、阅读更多
+                - 延伸阅读、扩展阅读、往期精彩
+
+            2. **指向外部的内容**：
+                - 包含链接列表的区块（多个外部链接标题）
+                - "继续浏览"、"查看更多"、"点击查看"
+                - "参考阅读"、"参考资料"（如果是外部链接）
+
+            3. **引导性内容**：
+                - "关注我们"、"订阅"、"扫码关注"
+                - "分享给朋友"、"转发到朋友圈"
+                - "点赞支持"、"收藏本页"
+
+            ### 必须保留的内容：
+
+            1. **当前页面的核心正文**：
+                - 文章标题和副标题
+                - 所有正文段落
+                - 列表、表格、代码块
+
+            2. **内部引用**：
+                - 文章内部的章节引用
+                - 文章内部的数据、图表说明
+
+            3. **补充说明**：
+                - 图片说明
+                - 重要提示、警告
+                - 作者信息、发布时间
+
+            ### 处理原则：
+
+            1. **遇到推荐内容立即停止**：
+                - 一旦识别出推荐区块，删除该区块及其后的所有内容
+                - 推荐内容通常出现在正文结束后
+
+            2. **链接判断标准**：
+                - 如果是当前文章的内部引用（如"见上文"、"如下图"）→ 保留
+                - 如果是指向其他文章/网站的链接 → 删除整个区块
+
+            3. **保留完整性**：
+                - 不要截断正在阅读的正文段落
+                - 确保删除后的内容仍然连贯
+
+            4. **保守策略**：
+                - 如果不确定是否是推荐内容，检查上下文
+                - 如果看起来像正文的一部分，保留
+
+            ### 输出要求：
+
+            - 直接输出清理后的 Markdown
+            - 不需要解释你删除了什么
+            - 保持原有格式（标题、列表、代码块）
+            - 如果整篇文章都是推荐内容，输出原文（不要全删）
+
+            ## 特殊情况：
+
+            **如果文章很短**：可能是单页应用，尽可能保留所有内容
+
+            **如果内容很乱**：优先保留看起来像正文的部分，删除明显的链接列表
+
+            **如果不确定**：保留！宁可多保留一些，也不要误删正文
+            """,
+            # chunk_token_threshold=16384,
+            verbose=False,
+        )
+
+        # 使用 LLM 过滤
+        cleaned_content = llm_filter.filter_content(markdown_content)
+
+        # 如果 LLM 返回的是列表，合并成字符串
+        if isinstance(cleaned_content, list):
+            cleaned_content = "\n\n".join(cleaned_content)
+
+        return cleaned_content if cleaned_content else markdown_content
+
+    except Exception as e:
+        logger.error(f"LLM cleaning error: {str(e)}")
+        # 如果 LLM 失败，返回原内容
+        return markdown_content
 
 async def handle_subweb_crawl_request(urls: List[str]) -> dict:
     """Handle sub web crawl requests ."""
@@ -816,7 +971,7 @@ async def handle_subweb_crawl_request(urls: List[str]) -> dict:
         # 检查输入格式
         has_titles = any("title:" in url and "url:" in url for url in urls)
 
-        # 从config.yml中加载配置（两种格式都需要的配置）
+        # 加载配置（两种格式都需要的配置）
         config = load_config()
         browser_config = BrowserConfig(
             extra_args=config["crawler"]["browser"].get("extra_args", []),
@@ -831,15 +986,18 @@ async def handle_subweb_crawl_request(urls: List[str]) -> dict:
 
         crawlconfig = CrawlerRunConfig(
             word_count_threshold=10,
-            excluded_tags=["nav", "footer", "header"],
+            excluded_tags=["nav", "footer", "header", "aside", "sidebar"],
             exclude_external_links=False,
             markdown_generator=DefaultMarkdownGenerator(
+                # content_filter=llm_filter,
                 content_filter=prune_filter,
                 options={"ignore_links": False, "escape_html": False, "body_width": 80},
             ),
             scraping_strategy=LXMLWebScrapingStrategy(),
             cache_mode=CacheMode.WRITE_ONLY,
             stream=False,
+            page_timeout=30000,
+            delay_before_return_html=3.0,
         )
 
         dispatcher = MemoryAdaptiveDispatcher(
@@ -853,6 +1011,37 @@ async def handle_subweb_crawl_request(urls: List[str]) -> dict:
 
         crawler = await get_crawler(browser_config)
 
+        # 新增：处理单个 URL 的函数
+        async def crawl_single_url(url: str):
+            # 检测域名
+            domain = extract_domain_from_url(url)
+            # 检查是否有 Token 配置
+            token_config = load_token_for_domain(domain) if domain else None
+            if token_config:
+                logger.info(f"Using token auth for {domain}")
+                # 生成 Hooks
+                hooks_code = generate_hooks_code(token_config)
+                # 附加 Hooks
+                from hook_manager import attach_user_hooks_to_crawler, UserHookManager
+
+                hook_manager = UserHookManager(timeout=30)
+                hooks_status, hook_manager = await attach_user_hooks_to_crawler(
+                    crawler, hooks_code, timeout=30, hook_manager=hook_manager
+                )
+                # 获取配置文件中的额外参数
+                crawler_config_overrides = get_crawler_config_overrides(token_config)
+                # 基于默认配置，只覆盖配置文件中的参数
+                if crawler_config_overrides:
+                    for key, value in crawler_config_overrides.items():
+                        if hasattr(crawlconfig, key):
+                            setattr(crawlconfig, key, value)
+            else:
+                logger.info(
+                    f"Using profile/default auth for {domain if domain else url}"
+                )
+
+            return await crawler.arun(url=url, config=crawlconfig)
+
         if has_titles:
             # 带标题的格式处理
             formatted_urls = []
@@ -865,7 +1054,11 @@ async def handle_subweb_crawl_request(urls: List[str]) -> dict:
                 url_part = parts[1] if len(parts) > 1 else ""
 
                 # 提取标题
-                title = title_part.split("title:", 1)[1].strip().rstrip(",")
+                original_title = title_part.split("title:", 1)[1].strip()
+
+                # 添加唯一标识符（使用UUID的前8位）确保标题唯一
+                unique_id = uuid4().hex[:8]
+                title = f"{original_title} [{unique_id}]"
 
                 # 提取URL
                 url = url_part.strip()
@@ -885,23 +1078,42 @@ async def handle_subweb_crawl_request(urls: List[str]) -> dict:
 
             results = []
             for url in formatted_urls:
-                result = await crawler.arun(url=url, config=crawlconfig)
+                result = await crawl_single_url(url)
                 results.append(result)
 
             # results = await crawler.arun_many(
             #     urls=formatted_urls, config=crawlconfig, dispatcher=dispatcher
             # )
 
-            # 构建带标题的结果字典
-            web_pages = {}
+            # 构建带标题的结果字典 - 并行 LLM 处理
+            # 第一步：收集所有需要清理的内容
+            tasks_data = []
             for i, (title, original_url) in enumerate(title_url_pairs):
                 if i < len(results) and results[i].markdown:
                     content = results[i].markdown.fit_markdown
-                    web_pages[f"web_page{i+1}"] = {
-                        "title": title,
-                        "url": original_url,
-                        "page_content": content,
-                    }
+                    tasks_data.append((i, title, original_url, content))
+
+            # 第二步：并行执行所有 LLM 清理任务
+            logger.info(f"[LLM Parallel] 开始并行清理 {len(tasks_data)} 个网页内容...")
+            llm_tasks = [
+                clean_recommendations_with_llm(content, config)
+                for _, _, _, content in tasks_data
+            ]
+            cleaned_contents = await asyncio.gather(*llm_tasks)
+            logger.info(
+                f"[LLM Parallel] 并行清理完成！共处理 {len(cleaned_contents)} 个网页"
+            )
+
+            # 第三步：组装结果
+            web_pages = {}
+            for (i, title, original_url, _), cleaned_content in zip(
+                tasks_data, cleaned_contents
+            ):
+                web_pages[f"web_page{i+1}"] = {
+                    "title": title,
+                    "url": original_url,
+                    "page_content": cleaned_content,
+                }
 
             response = {"success": True, "results": web_pages, "format": "titled"}
             return response
