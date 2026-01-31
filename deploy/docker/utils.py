@@ -24,27 +24,46 @@ def load_config() -> Dict:
     config_path = Path(__file__).parent / "config.yml"
     with open(config_path, "r") as config_file:
         config = yaml.safe_load(config_file)
-    
+
     # Override LLM provider from environment if set
     llm_provider = os.environ.get("LLM_PROVIDER")
     if llm_provider:
         config["llm"]["provider"] = llm_provider
         logging.info(f"LLM provider overridden from environment: {llm_provider}")
-    
+
     # Also support direct API key from environment if the provider-specific key isn't set
     llm_api_key = os.environ.get("LLM_API_KEY")
     if llm_api_key and "api_key" not in config["llm"]:
         config["llm"]["api_key"] = llm_api_key
         logging.info("LLM API key loaded from LLM_API_KEY environment variable")
-    
+
     return config
 
 def setup_logging(config: Dict) -> None:
     """Configure application logging."""
-    logging.basicConfig(
-        level=config["logging"]["level"],
-        format=config["logging"]["format"]
+    # 确保日志目录存在
+    log_file = config["logging"]["handlers"][0]["sink"]
+    log_dir = os.path.dirname(log_file)
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir, exist_ok=True)
+
+    # 配置日志处理器
+    file_handler = logging.handlers.TimedRotatingFileHandler(
+        filename=log_file, when="midnight", interval=1, backupCount=3, encoding="utf8"
     )
+    file_handler.setLevel(config["logging"]["handlers"][0]["level"])
+    file_handler.setFormatter(logging.Formatter(config["logging"]["format"]))
+
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(config["logging"]["handlers"][1]["level"])
+    console_handler.setFormatter(logging.Formatter(config["logging"]["format"]))
+
+    # 配置根日志记录器
+    root_logger = logging.getLogger()
+    root_logger.setLevel(config["logging"]["level"])
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(console_handler)
+
 
 def get_base_url(request: Request) -> str:
     """Get base URL including scheme and host."""
@@ -68,7 +87,6 @@ def should_cleanup_task(created_at: str, ttl_seconds: int = 3600) -> bool:
 def decode_redis_hash(hash_data: Dict[bytes, bytes]) -> Dict[str, str]:
     """Decode Redis hash data from bytes to strings."""
     return {k.decode('utf-8'): v.decode('utf-8') for k, v in hash_data.items()}
-
 
 
 def get_llm_api_key(config: Dict, provider: Optional[str] = None) -> Optional[str]:

@@ -1,0 +1,25 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Crawl4AI: Debug Server on 11235",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "uvicorn",
+            "args": [
+                "server:app",
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "11235",
+                // "--reload"
+            ],
+            "justMyCode": true,
+            "console": "integratedTerminal",
+            "cwd": "/app",  // 容器内路径
+            "env": {
+                "PYTHONPATH": "/app"  // 容器内路径
+            }
+        }
+    ]
+}

@@ -44,7 +44,8 @@ from utils import (
     get_llm_api_key,
     validate_llm_provider,
     get_llm_temperature,
-    get_llm_base_url
+    get_llm_base_url,
+    load_config
 )
 from webhook import WebhookDeliveryService
 
@@ -730,7 +731,7 @@ async def handle_stream_crawl_request(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e)
         )
-        
+
 async def handle_crawl_job(
     redis,
     background_tasks: BackgroundTasks,
@@ -807,3 +808,133 @@ async def handle_crawl_job(
 
     background_tasks.add_task(_runner)
     return {"task_id": task_id}
+
+
+async def handle_subweb_crawl_request(urls: List[str]) -> dict:
+    """Handle sub web crawl requests ."""
+    try:
+        # 检查输入格式
+        has_titles = any("title:" in url and "url:" in url for url in urls)
+
+        # 从config.yml中加载配置（两种格式都需要的配置）
+        config = load_config()
+        browser_config = BrowserConfig(
+            extra_args=config["crawler"]["browser"].get("extra_args", []),
+            **config["crawler"]["browser"].get("kwargs", {}),
+            verbose=True,
+        )
+
+        prune_filter = PruningContentFilter(
+            threshold=0.5,
+            threshold_type="fixed",
+        )
+
+        crawlconfig = CrawlerRunConfig(
+            word_count_threshold=10,
+            excluded_tags=["nav", "footer", "header"],
+            exclude_external_links=False,
+            markdown_generator=DefaultMarkdownGenerator(
+                content_filter=prune_filter,
+                options={"ignore_links": False, "escape_html": False, "body_width": 80},
+            ),
+            scraping_strategy=LXMLWebScrapingStrategy(),
+            cache_mode=CacheMode.WRITE_ONLY,
+            stream=False,
+        )
+
+        dispatcher = MemoryAdaptiveDispatcher(
+            memory_threshold_percent=config["crawler"]["memory_threshold_percent"],
+            rate_limiter=RateLimiter(
+                base_delay=tuple(config["crawler"]["rate_limiter"]["base_delay"])
+            ),
+        )
+
+        from crawler_pool import get_crawler
+
+        crawler = await get_crawler(browser_config)
+
+        if has_titles:
+            # 带标题的格式处理
+            formatted_urls = []
+            title_url_pairs = []
+
+            for item in urls:
+                # 解析带标题的格式
+                parts = item.split("url:", 1)
+                title_part = parts[0]
+                url_part = parts[1] if len(parts) > 1 else ""
+
+                # 提取标题
+                title = title_part.split("title:", 1)[1].strip().rstrip(",")
+
+                # 提取URL
+                url = url_part.strip()
+                formatted_urls.append(url)
+                title_url_pairs.append((title, url))
+
+            # 确保所有URL都有协议前缀
+            formatted_urls = [
+                (
+                    ("https://" + url)
+                    if not url.startswith(("http://", "https://"))
+                    and not url.startswith(("raw:", "raw://"))
+                    else url
+                )
+                for url in formatted_urls
+            ]
+
+            results = []
+            for url in formatted_urls:
+                result = await crawler.arun(url=url, config=crawlconfig)
+                results.append(result)
+
+            # results = await crawler.arun_many(
+            #     urls=formatted_urls, config=crawlconfig, dispatcher=dispatcher
+            # )
+
+            # 构建带标题的结果字典
+            web_pages = {}
+            for i, (title, original_url) in enumerate(title_url_pairs):
+                if i < len(results) and results[i].markdown:
+                    content = results[i].markdown.fit_markdown
+                    web_pages[f"web_page{i+1}"] = {
+                        "title": title,
+                        "url": original_url,
+                        "page_content": content,
+                    }
+
+            response = {"success": True, "results": web_pages, "format": "titled"}
+            return response
+
+        else:
+            # 原始简单URL格式处理
+            processed_urls = [
+                (
+                    ("https://" + url)
+                    if not url.startswith(("http://", "https://"))
+                    and not url.startswith(("raw:", "raw://"))
+                    else url
+                )
+                for url in urls
+            ]
+
+            results = await crawler.arun_many(
+                urls=processed_urls, config=crawlconfig, dispatcher=dispatcher
+            )
+
+            # 处理所有结果
+            markdown_results = []
+            for result in results:
+                markdown = result.markdown
+                if markdown:
+                    markdown_results.append(markdown.fit_markdown)
+
+            response = {
+                "success": True,
+                "results": markdown_results,
+                "format": "simple",
+            }
+            return response
+
+    except Exception as e:
+        return {"success": False, "error": str(e)}

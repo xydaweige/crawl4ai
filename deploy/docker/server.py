@@ -20,7 +20,8 @@ from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
 from api import (
     handle_markdown_request, handle_llm_qa,
     handle_stream_crawl_request, handle_crawl_request,
-    stream_results
+    stream_results,
+    handle_subweb_crawl_request
 )
 from schemas import (
     CrawlRequestWithHooks,
@@ -748,6 +749,31 @@ async def get_context(
         results["doc_results"] = [
             {"text": sections[i], "score": scores_d[i]} for i in valid
         ]
+
+    return JSONResponse(results)
+
+
+@app.post("/mdresult")
+@limiter.limit(config["rate_limiting"]["default_limit"])
+async def sub_webcrawler(
+    request: Request,
+    crawl_request: CrawlRequestWithHooks,
+    _td: Dict = Depends(token_dep),
+):
+    if not crawl_request.urls:
+        raise HTTPException(400, "At least one URL required")
+
+    hooks_config = None
+    if crawl_request.hooks:
+        hooks_config = {
+            "code": crawl_request.hooks.code,
+            "timeout": crawl_request.hooks.timeout,
+        }
+
+    results = await handle_subweb_crawl_request(
+        urls=crawl_request.urls
+    )
+
 
     return JSONResponse(results)
 
